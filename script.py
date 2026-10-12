@@ -76,29 +76,45 @@ try:
         except TimeoutException:
             pass
 
+    ITEM = "comment" if MODE == 1 else "like"
+    ACTION = "Delete" if MODE == 1 else "Unlike"
+
+    def leaf(text):
+        # Leaf elements whose text is exactly `text`. Instagram's markup has no stable attributes for these.
+        return driver.find_elements(By.XPATH, f'//*[not(*) and normalize-space(.)="{text}"]')
+
+    def js_click(element):
+        driver.execute_script("arguments[0].click();", element)
+
+    def dump_page(name):
+        # Save the page's HTML so broken selectors can be diagnosed
+        path = pathlib.Path(name).absolute()
+        path.write_text(driver.page_source, encoding="utf-8")
+        logging.warning("Saved page HTML to " + str(path))
+
     # Main loop
     while True:
         # Click select button
-        is_clicked_select = False
-        while not is_clicked_select:
-            logging.info("Waiting for " + ("comments" if MODE == 1 else "likes") + " to load...")
+        select_wait_count = 0
+        while True:
+            logging.info("Waiting for " + ITEM + "s to load...")
             time.sleep(2)
-            for i in driver.find_elements(By.CSS_SELECTOR, 'span[data-bloks-name="bk.components.Text"]'):
-                if i.text == "Select":
-                    for j in driver.find_elements(By.CSS_SELECTOR, 'span[data-bloks-name="bk.components.Text"]'):
-                        if j.text == "No results":
-                            logging.info("No " + ("comments" if MODE == 1 else "likes") + " found. DONE. Quitting")
-                            driver.quit()
-                            sys.exit(0)
-                    driver.execute_script("arguments[0].click();", i)
-                    logging.info("Comments" if MODE == 1 else "Likes" + " loaded")
-                    logging.info("Clicked 'Select'")
-                    is_clicked_select = True
-                    break
-                if i.text == "You haven't " + ("commented on" if MODE == 1 else "liked") + " anything":
-                    logging.info("No " + ("comments" if MODE == 1 else "likes") + " found. DONE. Quitting")
-                    driver.quit()
-                    sys.exit(0)
+            if leaf("No results") or leaf("You haven't " + ("commented on" if MODE == 1 else "liked") + " anything"):
+                logging.info("No " + ITEM + "s found. DONE. Quitting")
+                driver.quit()
+                sys.exit(0)
+            if cancel := leaf("Cancel"):
+                # Selection mode was left on. Reset it so every checkbox starts unticked
+                js_click(cancel[0])
+                logging.info("Clicked 'Cancel' to reset selection mode")
+                continue
+            if select := leaf("Select"):
+                js_click(select[0])
+                logging.info("Clicked 'Select'")
+                break
+            select_wait_count += 1
+            if select_wait_count == 10:
+                dump_page("debug_select.html")
 
         # Select all content
         selected_count = 0
@@ -108,14 +124,18 @@ try:
             if is_refreshed:
                 break
             time.sleep(1)
-            for i in driver.find_elements(By.CSS_SELECTOR, 'div[data-bloks-name="ig.components.Icon"]'):
-                if i.get_attribute("style").startswith('mask-image: url("https://i.instagram.com/static/images/bloks/icons/generated/circle__outline'):
-                    driver.execute_script("arguments[0].click();", i)
-                    selected_count += 1
-                    logging.info("Selected a " + ("comment" if MODE == 1 else "like") + " (Total: " + str(selected_count) + ")")
-                    if selected_count == AT_ONCE_DELETE:
-                        break
+            for i in driver.find_elements(By.CSS_SELECTOR, 'div[data-testid="bulk_action_checkbox"]'):
+                # Unticked checkboxes show the circle__outline icon
+                if not i.find_elements(By.CSS_SELECTOR, '[style*="circle__outline"]'):
+                    continue
+                js_click(i.find_element(By.CSS_SELECTOR, '[aria-label="Toggle checkbox"]'))
+                selected_count += 1
+                logging.info("Selected a " + ITEM + " (Total: " + str(selected_count) + ")")
+                if selected_count == AT_ONCE_DELETE:
+                    break
             while_it_count += 1
+            if while_it_count == 5 and selected_count == 0:
+                dump_page("debug_items.html")
             if while_it_count > 10:
                 if CHECK_EVERY == -1:
                     logging.warning("Are you seeing this popup -> 'There was a problem with removing some or all of your content. Try removing it again.' If so, it looks like you have reached the rate limit for remove operations. This is a server-side restriction from Instagram. You can: [1] quit the script now and run it later, or [2] leave it running and it will refresh the page every x hours to check if the rate limit is lifted, and continue unliking posts if it is. (Untested. It may or may not work.)")
@@ -128,15 +148,15 @@ try:
                     while True:
                         hours_check_every = input("Check every x hour(s) (decimal is allowed, enter nothing to default to 1 hour) [x]: ")
                         try:
-                            hours_check_every = float(hours_check_every)
+                            hours_check_every = float(hours_check_every or 1)
                             break
                         except:
                             pass
                     CHECK_EVERY = int(hours_check_every * 3600)
                     logging.info("Received. Will check every " + str(hours_check_every) + " hour(s). It might not be exact due to intentional randomization.")
-                for i in driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] button'):
-                    if i.find_element(By.CSS_SELECTOR, "div").text == "OK":
-                        driver.execute_script("arguments[0].click();", i)
+                for i in driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] button, div[role="dialog"] [role="button"]'):
+                    if i.text.strip() == "OK":
+                        js_click(i)
                         logging.info("Clicked 'OK' on 'Something went wrong' dialog")
                         break
                 logging.info("Now we wait...")
@@ -150,23 +170,30 @@ try:
             continue
 
         # Click delete
-        for i in driver.find_elements(By.CSS_SELECTOR, 'span[data-bloks-name="bk.components.TextSpan"]'):
-            if i.text == ("Delete" if MODE == 1 else "Unlike"):
-                time.sleep(1)
-                driver.execute_script("arguments[0].click();", i)
-                logging.info("Clicked " + ("'Delete'" if MODE == 1 else "'Unlike'"))
-                break
+        time.sleep(1)
+        action_buttons = driver.find_elements(By.CSS_SELECTOR, f'[role="button"][aria-label="{ACTION}"]') or leaf(ACTION)
+        if not action_buttons:
+            dump_page("debug_action.html")
+            raise RuntimeError("Could not find the '" + ACTION + "' button")
+        # This button ignores JavaScript clicks, so use a real one
+        action_buttons[0].click()
+        logging.info("Clicked '" + ACTION + "'")
 
         # Confirm delete
         is_clicked_confirmation = False
+        confirm_wait_count = 0
         while not is_clicked_confirmation:
             time.sleep(1)
-            for i in driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] button'):
-                if i.find_element(By.CSS_SELECTOR, "div").text == ("Delete" if MODE == 1 else "Unlike"):
-                    driver.execute_script("arguments[0].click();", i)
-                    logging.info("Clicked " + ("'Delete'" if MODE == 1 else "'Unlike'") + " on confirmation dialog")
+            for i in driver.find_elements(By.CSS_SELECTOR, 'div[role="dialog"] button, div[role="dialog"] [role="button"]'):
+                if i.text.strip() == ACTION:
+                    i.click()
+                    logging.info("Clicked '" + ACTION + "' on confirmation dialog")
                     is_clicked_confirmation = True
                     break
+            confirm_wait_count += 1
+            if confirm_wait_count == 15 and not is_clicked_confirmation:
+                dump_page("debug_confirm.html")
+                raise RuntimeError("Could not find the '" + ACTION + "' confirmation dialog")
 
 except KeyboardInterrupt:
     print()
