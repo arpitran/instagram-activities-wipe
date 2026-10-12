@@ -83,6 +83,11 @@ try:
         # Leaf elements whose text is exactly `text`. Instagram's markup has no stable attributes for these.
         return driver.find_elements(By.XPATH, f'//*[not(*) and normalize-space(.)="{text}"]')
 
+    def is_empty():
+        # Instagram writes the empty-state message with a curly apostrophe
+        nothing = " " + ("commented on" if MODE == 1 else "liked") + " anything"
+        return leaf("No results") or leaf("You haven't" + nothing) or leaf("You haven\u2019t" + nothing)
+
     def js_click(element):
         driver.execute_script("arguments[0].click();", element)
 
@@ -96,10 +101,11 @@ try:
     while True:
         # Click select button
         select_wait_count = 0
+        refresh_count = 0
         while True:
             logging.info("Waiting for " + ITEM + "s to load...")
             time.sleep(2)
-            if leaf("No results") or leaf("You haven't " + ("commented on" if MODE == 1 else "liked") + " anything"):
+            if is_empty():
                 logging.info("No " + ITEM + "s found. DONE. Quitting")
                 driver.quit()
                 sys.exit(0)
@@ -113,8 +119,17 @@ try:
                 logging.info("Clicked 'Select'")
                 break
             select_wait_count += 1
-            if select_wait_count == 10:
-                dump_page("debug_select.html")
+            if select_wait_count == 15:
+                # The page sometimes comes back with no list and no 'Select' button
+                if refresh_count == 2:
+                    dump_page("debug_select.html")
+                    logging.info("No " + ITEM + "s are showing after refreshing twice. Either everything is wiped or Instagram has stopped loading them (try again later). Quitting")
+                    driver.quit()
+                    sys.exit(0)
+                logging.info("Nothing loaded. Refreshing the page...")
+                driver.refresh()
+                refresh_count += 1
+                select_wait_count = 0
 
         # Select all content
         selected_count = 0
@@ -176,6 +191,7 @@ try:
             dump_page("debug_action.html")
             raise RuntimeError("Could not find the '" + ACTION + "' button")
         # This button ignores JavaScript clicks, so use a real one
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", action_buttons[0])
         action_buttons[0].click()
         logging.info("Clicked '" + ACTION + "'")
 
